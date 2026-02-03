@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+numpy
+opencv-python
+insightface
+onnxruntime
+requests
+fastapi
+uvicorn
+python-dotenv
+cloudinaryqrcode[pil]
+pillow
