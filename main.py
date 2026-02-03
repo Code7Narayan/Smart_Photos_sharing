@@ -7,6 +7,7 @@ import numpy as np
 import requests
 import json
 from io import BytesIO
+import threading
 
 try:
     import qrcode
@@ -29,9 +30,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------- FACE ENGINE INIT ----------------
-face_app = FaceAnalysis(providers=['CPUExecutionProvider'])
-face_app.prepare(ctx_id=-1, det_size=(640, 640))
+# ================= LAZY LOADED FACE ENGINE =================
+
+face_app = None
+face_lock = threading.Lock()  # Thread safety
+
+
+def get_face_app():
+    """
+    Lazy loader for InsightFace model.
+    Loads only once, when first needed.
+    """
+    global face_app
+    if face_app is None:
+        with face_lock:
+            if face_app is None:  # Double-check locking
+                print("🔄 Loading InsightFace model (lazy init)...")
+                face_app = FaceAnalysis(providers=['CPUExecutionProvider'])
+                # Reduced det_size to lower memory usage
+                face_app.prepare(ctx_id=-1, det_size=(320, 320))
+                print("✅ InsightFace model loaded successfully")
+    return face_app
+
 
 # ================= REQUEST MODELS =================
 
@@ -65,18 +85,15 @@ def health():
 
 @app.post("/qr/generate")
 async def generate_qr(req: QRCodeRequest):
-    """Generate QR code for event joining"""
     if not QR_CODE_AVAILABLE:
         return {"success": False, "error": "QR code generation not available. Install with: pip install qrcode[pil]"}
     
     try:
-        # Create QR data
         qr_data = {
             "type": "JOIN_EVENT",
             "eventId": req.eventId
         }
-        
-        # Generate QR code
+
         qr = qrcode.QRCode(
             version=1,
             error_correction=qrcode.constants.ERROR_CORRECT_H,
@@ -85,17 +102,15 @@ async def generate_qr(req: QRCodeRequest):
         )
         qr.add_data(json.dumps(qr_data))
         qr.make(fit=True)
-        
-        # Create image
+
         img = qr.make_image(fill_color="black", back_color="white")
-        
-        # Convert to bytes
+
         img_io = BytesIO()
         img.save(img_io, format='PNG')
         img_io.seek(0)
-        
+
         return StreamingResponse(img_io, media_type="image/png")
-    
+
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -106,18 +121,15 @@ async def generate_qr(req: QRCodeRequest):
 async def enroll_face(req: EnrollRequest):
     print(f"Enroll request received for UID: {req.uid}")
     try:
-        print(f"Downloading image: {req.imageUrl}")
         response = requests.get(req.imageUrl)
         img_array = np.asarray(bytearray(response.content), dtype=np.uint8)
         img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
 
-        print("Detecting faces...")
-        faces = face_app.get(img)
+        faces = get_face_app().get(img)
 
         if not faces:
             return {"success": False, "message": "No face detected"}
 
-        # Take first detected face
         embedding = faces[0].embedding.tolist()
 
         return {
@@ -139,7 +151,7 @@ async def match_face(req: MatchRequest):
         img_array = np.asarray(bytearray(response.content), dtype=np.uint8)
         img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
 
-        faces = face_app.get(img)
+        faces = get_face_app().get(img)
 
         if not faces:
             return {"success": True, "matches": []}
@@ -156,7 +168,6 @@ async def match_face(req: MatchRequest):
                     np.linalg.norm(face_emb) * np.linalg.norm(db_emb)
                 )
 
-                # Similarity threshold
                 if sim > 0.45:
                     results.append({
                         "uid": user["uid"],
@@ -178,5 +189,3 @@ def cloudinary_delete(req: CloudinaryDeleteRequest):
         return {"success": True, "result": result}
     except Exception as e:
         return {"success": False, "error": str(e)}
-
-
