@@ -1,0 +1,4 @@
+serviceAccountKey*.json
+.env.production
+__pycache__/
+env/
