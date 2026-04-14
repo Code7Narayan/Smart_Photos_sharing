@@ -1,0 +1,81 @@
+# render.yaml — Infrastructure as Code for Render
+# Docs: https://docs.render.com/blueprint-spec
+#
+# Deploy: Connect this repo to Render and it will auto-detect this file.
+# All three services (API + Redis + ML Worker) are created automatically.
+
+services:
+  # ── API Service (public-facing) ──────────────────────────────────
+  - type: web
+    name: smart-photo-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: starter          # $7/mo — 512MB RAM (API doesn't load ML model)
+    envVars:
+      - key: APP_ROLE
+        value: api
+      - key: REDIS_URL
+        fromDatabase:
+          name: smart-photo-redis
+          property: connectionString
+      - key: CLOUDINARY_CLOUD_NAME
+        value: dr3bhv4fp
+      - key: CLOUDINARY_API_KEY
+        value: "514366221817553"
+      - key: CLOUDINARY_API_SECRET
+        sync: false        # Set manually in Render dashboard (secret)
+      - key: GOOGLE_APPLICATION_CREDENTIALS
+        value: /app/serviceAccountKey.json
+      - key: ALLOWED_ORIGINS
+        value: "*"
+      - key: WEB_CONCURRENCY
+        value: "4"
+    startCommand: >
+      gunicorn main:app
+        --workers 4
+        --worker-class uvicorn.workers.UvicornWorker
+        --bind 0.0.0.0:$PORT
+        --timeout 30
+        --access-logfile -
+        --error-logfile -
+    healthCheckPath: /health
+
+  # ── ML Worker (private, no public URL) ─────────────────────────
+  - type: worker
+    name: smart-photo-ml-worker
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: starter plus     # $25/mo — 2GB RAM (InsightFace needs ~700MB)
+    envVars:
+      - key: APP_ROLE
+        value: worker
+      - key: REDIS_URL
+        fromDatabase:
+          name: smart-photo-redis
+          property: connectionString
+      - key: CLOUDINARY_CLOUD_NAME
+        value: dr3bhv4fp
+      - key: CLOUDINARY_API_KEY
+        value: "514366221817553"
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+      - key: GOOGLE_APPLICATION_CREDENTIALS
+        value: /app/serviceAccountKey.json
+      - key: MAX_AI_THREADS
+        value: "2"
+    startCommand: >
+      gunicorn main:app
+        --workers 1
+        --worker-class uvicorn.workers.UvicornWorker
+        --bind 0.0.0.0:8001
+        --timeout 120
+        --access-logfile -
+        --error-logfile -
+
+databases:
+  - name: smart-photo-redis
+    plan: starter          # $7/mo — 25MB (enough for job queue + embedding cache)
+    databaseName: smart_photo_cache
+    ipAllowList: []        # Only allow internal access

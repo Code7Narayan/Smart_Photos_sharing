@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+python-multipart
+numpy
+opencv-python-headless
+insightface
+onnxruntime
+requests
+python-dotenv
+cloudinary
+qrcode[pil]
+pillow
+firebase-admin
+gunicorn
+slowapi
+redis

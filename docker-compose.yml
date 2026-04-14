@@ -1,0 +1,109 @@
+version: "3.9"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Smart Photo Sharing — Production Docker Compose
+#
+# Three services:
+#   redis       – shared job guard + embedding cache + PERSISTENT job queue
+#   api         – FastAPI (4 workers, NO InsightFace loaded, auth-gated)
+#                 APP_ROLE=api  → lifespan skips model load, enqueues to Redis
+#   ml_worker   – FastAPI (1 worker), APP_ROLE=worker
+#                 → loads InsightFace once, runs BLPOP consumer loop
+#
+# Scale ML workers for peak events:
+#   docker compose up -d --scale ml_worker=3
+#
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+  # ── Redis ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: always
+    # Persist queue to disk so jobs survive container restarts
+    command: >
+      redis-server
+        --maxmemory 256mb
+        --maxmemory-policy allkeys-lru
+        --appendonly yes
+        --appendfilename "appendonly.aof"
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── API server (no ML model, many workers) ─────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    command: >
+      gunicorn main:app
+        --workers 4
+        --worker-class uvicorn.workers.UvicornWorker
+        --bind 0.0.0.0:8000
+        --timeout 30
+        --access-logfile -
+        --error-logfile -
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env.production
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - APP_ROLE=api
+      # ⚠️  Set your actual app domains here before going live:
+      # - ALLOWED_ORIGINS=https://your-app.com,https://admin.your-app.com
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ── ML worker (InsightFace loaded once, low replica count) ─────────────────
+  # APP_ROLE=worker causes:
+  #   1. InsightFace model to be loaded in lifespan startup
+  #   2. _worker_job_loop() to start consuming from Redis queue via BLPOP
+  #   3. Crash-fast if Redis is unreachable (Docker will auto-restart)
+  ml_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    # Single uvicorn worker per container — InsightFace is not thread-safe
+    # for multiple concurrent model loads. Scale via container replicas instead.
+    command: >
+      gunicorn main:app
+        --workers 1
+        --worker-class uvicorn.workers.UvicornWorker
+        --bind 0.0.0.0:8001
+        --timeout 120
+        --access-logfile -
+        --error-logfile -
+    env_file:
+      - .env.production
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - APP_ROLE=worker
+      - MAX_AI_THREADS=2
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 2G     # buffalo_l ~700MB + headroom for concurrent jobs
+          cpus: "2.0"
+
+volumes:
+  redis_data:
